@@ -259,15 +259,17 @@ def ask_question(data: Question):
     prompt = f"""
 You are a legal AI assistant.
 
-Based on the context below, answer the question and extract the exact short text snippet (1 to 5 words) from the context that directly represents the answer (e.g., the topic title, the specific date, or the name of a party) to highlight in the PDF.
+Based on the context below, answer the question and extract the exact full text phrase representing the answer to highlight in the PDF. The quote must contain literal word-for-word, case-sensitive substrings from the Context.
+
+If the answer consists of a list of multiple distinct items, projects, dates, or names scattered in different parts of the document, the "quote" MUST be a comma-separated list of those exact phrases (e.g. "Item 1, Item 2, Item 3"). Do not paraphrase or change punctuation.
 
 Respond in JSON format with these exact keys:
 {{
   "answer": "your natural language answer here",
-  "quote": "the exact short text snippet from the context here"
+  "quote": "the exact full text phrase or comma-separated list of phrases from the context here"
 }}
 
-IMPORTANT: The "quote" MUST be a literal word-for-word, case-sensitive substring from the Context below. Do not paraphrase or change punctuation. If the exact phrase is not in the context, the PDF viewer will fail to highlight it.
+IMPORTANT: The "quote" (or each comma-separated phrase inside it) MUST be a literal word-for-word, case-sensitive substring from the Context below. If any phrase is not in the context, the PDF viewer will fail to highlight it.
 
 Context:
 {context}
@@ -287,21 +289,51 @@ Question:
         answer = answer_raw
         quote = ""
 
-    # Sanitize and ensure the quote literally exists in the context
+    # Sanitize and ensure the quote parts literally exist in the context with advanced matching
     if quote:
-        quote = quote.strip()
-        if quote.lower() not in context.lower():
-            # Try to find a fallback keyword that is in the context
-            words = [w for w in quote.replace(".", "").replace(",", "").split() if len(w) > 3]
-            found = False
-            for w in words:
-                if w.lower() in context.lower():
-                    idx = context.lower().find(w.lower())
-                    quote = context[idx:idx+len(w)]
-                    found = True
-                    break
-            if not found:
-                quote = ""
+        import re
+        parts = [p.strip() for p in quote.split(",") if p.strip()]
+        validated_parts = []
+        
+        for part in parts:
+            part_lower = part.lower()
+            context_lower = context.lower()
+            
+            if part_lower in context_lower:
+                # Direct exact case-insensitive match: align case with context
+                idx = context_lower.find(part_lower)
+                validated_parts.append(context[idx:idx+len(part)])
+            else:
+                # Fuzzy match for this specific part
+                clean_words = [re.sub(r'[^\w]', '', w) for w in part.split()]
+                clean_words = [w for w in clean_words if w]
+                if len(clean_words) >= 2:
+                    first_word = clean_words[0]
+                    last_word = clean_words[-1]
+                    try:
+                        pattern = re.compile(
+                            re.escape(first_word) + r'.{0,120}?' + re.escape(last_word),
+                            re.IGNORECASE | re.DOTALL
+                        )
+                        match = pattern.search(context)
+                        if match:
+                            validated_parts.append(match.group(0))
+                    except Exception as e:
+                        print("Regex match error:", e)
+                elif len(clean_words) == 1:
+                    single_word = clean_words[0]
+                    try:
+                        pattern = re.compile(re.escape(single_word), re.IGNORECASE)
+                        match = pattern.search(context)
+                        if match:
+                            validated_parts.append(match.group(0))
+                    except Exception as e:
+                        print("Regex match error:", e)
+        
+        if validated_parts:
+            quote = ", ".join(validated_parts)
+        else:
+            quote = ""
 
     # Increment QnA count for the document in MongoDB
     if data.filename:

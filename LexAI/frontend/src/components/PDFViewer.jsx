@@ -29,7 +29,14 @@ export default function PDFViewer({ pdfUrl, searchText }) {
 
   useEffect(() => {
     if (isDocumentLoaded && searchText && searchText.trim()) {
-      highlight([searchText]);
+      const searchTerms = searchText
+        .split(",")
+        .map((term) => term.trim())
+        .filter((term) => term.length > 0);
+      
+      if (searchTerms.length > 0) {
+        highlight(searchTerms);
+      }
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [searchText, isDocumentLoaded]);
