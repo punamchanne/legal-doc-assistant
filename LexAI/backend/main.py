@@ -32,43 +32,79 @@ import os
 load_dotenv()
 
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-
-if not GROQ_API_KEY:
-    raise RuntimeError("GROQ_API_KEY missing")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
 # ================= GROQ =================
-client = Groq(
-    api_key=GROQ_API_KEY
-)
+client = None
+if GROQ_API_KEY:
+    client = Groq(
+        api_key=GROQ_API_KEY
+    )
 
 def call_groq(prompt: str, json_mode: bool = False):
-
+    if not client:
+        return None
     try:
-
         extra_args = {}
         if json_mode:
             extra_args["response_format"] = {"type": "json_object"}
 
         chat_completion = client.chat.completions.create(
-
             messages=[
                 {
                     "role": "user",
                     "content": prompt
                 }
             ],
-
             model="llama-3.3-70b-versatile",
             **extra_args
         )
-
         return chat_completion.choices[0].message.content
-
     except Exception as e:
-
         print("Groq Error:", e)
+        return None
 
-        return "AI service unavailable"
+# ================= GEMINI =================
+def call_gemini(prompt: str, json_mode: bool = False):
+    if not GEMINI_API_KEY:
+        return None
+    try:
+        import requests
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
+        headers = {"Content-Type": "application/json"}
+        
+        payload = {
+            "contents": [{
+                "parts": [{"text": prompt}]
+            }]
+        }
+        
+        if json_mode:
+            payload["generationConfig"] = {
+                "responseMimeType": "application/json"
+            }
+            
+        r = requests.post(url, headers=headers, json=payload, timeout=20)
+        r.raise_for_status()
+        res_json = r.json()
+        
+        text_content = res_json['candidates'][0]['content']['parts'][0]['text']
+        return text_content
+    except Exception as e:
+        print("Gemini Error:", e)
+        return None
+
+# ================= UNIFIED LLM CALL =================
+def call_llm(prompt: str, json_mode: bool = False):
+    if GEMINI_API_KEY:
+        res = call_gemini(prompt, json_mode)
+        if res:
+            return res
+    if GROQ_API_KEY:
+        res = call_groq(prompt, json_mode)
+        if res:
+            return res
+    return "AI service unavailable"
 
 # ================= APP =================
 app = FastAPI()
@@ -231,6 +267,8 @@ Respond in JSON format with these exact keys:
   "quote": "the exact short text snippet from the context here"
 }}
 
+IMPORTANT: The "quote" MUST be a literal word-for-word, case-sensitive substring from the Context below. Do not paraphrase or change punctuation. If the exact phrase is not in the context, the PDF viewer will fail to highlight it.
+
 Context:
 {context}
 
@@ -238,7 +276,7 @@ Question:
 {data.question}
 """
 
-    answer_raw = call_groq(prompt, json_mode=True)
+    answer_raw = call_llm(prompt, json_mode=True)
 
     import json
     try:
@@ -248,6 +286,22 @@ Question:
     except Exception:
         answer = answer_raw
         quote = ""
+
+    # Sanitize and ensure the quote literally exists in the context
+    if quote:
+        quote = quote.strip()
+        if quote.lower() not in context.lower():
+            # Try to find a fallback keyword that is in the context
+            words = [w for w in quote.replace(".", "").replace(",", "").split() if len(w) > 3]
+            found = False
+            for w in words:
+                if w.lower() in context.lower():
+                    idx = context.lower().find(w.lower())
+                    quote = context[idx:idx+len(w)]
+                    found = True
+                    break
+            if not found:
+                quote = ""
 
     # Increment QnA count for the document in MongoDB
     if data.filename:
@@ -451,7 +505,7 @@ Respond STRICTLY in JSON format with these exact keys:
 Document Text Snippet:
 {text_snippet}
 """
-    analysis_raw = call_groq(classify_prompt, json_mode=True)
+    analysis_raw = call_llm(classify_prompt, json_mode=True)
     
     import json
     try:

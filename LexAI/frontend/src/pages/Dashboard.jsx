@@ -293,16 +293,16 @@ export default function Dashboard() {
           <div style={styles.topbar}>
             <div>
               <h1 style={styles.topbarTitle}>
-                {activeTab === "dashboard" && "Legal Dashboard"}
+                {activeTab === "dashboard" && "Dashboard"}
                 {activeTab === "history" && "Document Upload History"}
                 {activeTab === "analytics" && "Usage & Compliance Analytics"}
                 {activeTab === "profile" && "User Profile"}
               </h1>
               <p style={styles.topbarSubtitle}>
-                {activeTab === "dashboard" && "Upload, analyze, and query your legal documents instantly."}
+                {activeTab === "dashboard" && "Upload, analyze, and query your documents instantly."}
                 {activeTab === "history" && "Access previously parsed documents and index files."}
                 {activeTab === "analytics" && "Review document types, usage statistics, and activity."}
-                {activeTab === "profile" && "Manage your login details and active LexAI configurations."}
+                {activeTab === "profile" && "Manage your account and profile settings."}
               </p>
             </div>
             <div style={styles.topbarUser}>
@@ -430,7 +430,7 @@ export default function Dashboard() {
                     {/* Q&A CHAT */}
                     <div style={styles.chatPane}>
                       <div style={styles.chatHeader}>
-                        <h3>💬 AI Legal Consultant</h3>
+                        <h3>💬 Assistant Workspace</h3>
                       </div>
                       <div style={styles.chatBox}>
                         {chat.map((msg, i) => (
@@ -456,7 +456,7 @@ export default function Dashboard() {
                           value={question}
                           onChange={(e) => setQuestion(e.target.value)}
                           onKeyDown={(e) => e.key === "Enter" && askQuestion()}
-                          placeholder="Ask AI a question about this document..."
+                          placeholder="Ask a question about this document..."
                         />
                         <button style={styles.askBtn} onClick={askQuestion}>
                           Ask
@@ -527,7 +527,7 @@ export default function Dashboard() {
           {activeTab === "analytics" && (
             <div style={styles.tabContent}>
               {loadingAnalytics ? (
-                <p style={styles.loadingText}>Compiling database insights...</p>
+                <p style={styles.loadingText}>Compiling insights...</p>
               ) : !analyticsData ? (
                 <div style={styles.emptyContainer}>
                   <h3>No analytics available</h3>
@@ -630,16 +630,12 @@ export default function Dashboard() {
                       <span style={{ ...styles.detailValue, color: "#10b981", fontWeight: "bold" }}>Active</span>
                     </div>
                     <div style={styles.detailRow}>
-                      <span style={styles.detailLabel}>Database Engine:</span>
-                      <span style={styles.detailValue}>MongoDB Compass</span>
+                      <span style={styles.detailLabel}>Account Role:</span>
+                      <span style={styles.detailValue}>Document Consultant</span>
                     </div>
                     <div style={styles.detailRow}>
-                      <span style={styles.detailLabel}>Active Host Port:</span>
-                      <span style={styles.detailValue}>FastAPI Localhost (8000)</span>
-                    </div>
-                    <div style={styles.detailRow}>
-                      <span style={styles.detailLabel}>Compliance Model:</span>
-                      <span style={styles.detailValue}>Groq Cloud Llama-3.3-70b-versatile</span>
+                      <span style={styles.detailLabel}>Registered On:</span>
+                      <span style={styles.detailValue}>June 2026</span>
                     </div>
                   </div>
                 </div>
@@ -1232,4 +1228,4 @@ const styles = {
     fontSize: "13px",
     color: "#94a3b8"
   }
-};
+};
