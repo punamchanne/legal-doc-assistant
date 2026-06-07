@@ -684,7 +684,10 @@ const styles = {
   },
   sidebarBtn: {
     background: "transparent",
-    border: "none",
+    borderWidth: "0px",
+    borderLeftWidth: "4px",
+    borderLeftStyle: "solid",
+    borderLeftColor: "transparent",
     color: "#94a3b8",
     textAlign: "left",
     padding: "12px 16px",
@@ -698,7 +701,7 @@ const styles = {
     background: "#1e293b",
     color: "#fff",
     fontWeight: "bold",
-    borderLeft: "4px solid #ef4444"
+    borderLeftColor: "#ef4444"
   },
   sidebarLogout: {
     background: "#ef4444",
