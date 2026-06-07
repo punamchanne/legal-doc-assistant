@@ -1,0 +1,27 @@
+# Cache files
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+
+# Databases
+**/chroma_db/
+**/chroma_db/*
+chroma_db/
+
+# Uploads
+**/uploads/
+**/uploads/*
+uploads/
+
+# Frontend dependencies and builds
+**/node_modules/
+node_modules/
+dist/
+build/
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local

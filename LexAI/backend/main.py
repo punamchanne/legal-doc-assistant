@@ -1,87 +1,150 @@
+from fastapi.staticfiles import StaticFiles
 from fastapi import FastAPI, Depends, HTTPException, UploadFile, File, Body
-
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+from pymongo.errors import PyMongoError
+
+from typing import Optional
 from pydantic import BaseModel
-from sqlalchemy.orm import Session
+
+from db import db
+from datetime import datetime, timezone
+
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain_community.embeddings import HuggingFaceEmbeddings
-from langchain_community.vectorstores import Chroma
-from db import Base, engine, SessionLocal
-from user_model import User
+
+from langchain_huggingface import HuggingFaceEmbeddings
+from langchain_chroma import Chroma
 from auth_utils import hash_password, verify_password
-from sqlalchemy import text
-import shutil
-from utils.document_reader import extract_text_from_pdf, extract_text_from_image
-from google import genai
+
+from utils.document_reader import (
+    extract_text_from_pdf,
+    extract_text_from_image
+)
+
+from groq import Groq
+
 from dotenv import load_dotenv
-load_dotenv()
+
+import shutil
 import os
 
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-if not GEMINI_API_KEY:
-    raise RuntimeError("GEMINI_API_KEY is missing")
+# ================= LOAD ENV =================
+load_dotenv()
 
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
-from google import genai
+if not GROQ_API_KEY:
+    raise RuntimeError("GROQ_API_KEY missing")
 
-def call_gemini(prompt: str) -> str:
-    client = genai.Client(api_key=GEMINI_API_KEY)
+# ================= GROQ =================
+client = Groq(
+    api_key=GROQ_API_KEY
+)
 
-    response = client.models.generate_content(
-        model="models/gemini-flash-latest",
-        contents=prompt
-    )
+def call_groq(prompt: str, json_mode: bool = False):
 
-    return response.text
+    try:
 
+        extra_args = {}
+        if json_mode:
+            extra_args["response_format"] = {"type": "json_object"}
 
+        chat_completion = client.chat.completions.create(
 
+            messages=[
+                {
+                    "role": "user",
+                    "content": prompt
+                }
+            ],
 
+            model="llama-3.3-70b-versatile",
+            **extra_args
+        )
+
+        return chat_completion.choices[0].message.content
+
+    except Exception as e:
+
+        print("Groq Error:", e)
+
+        return "AI service unavailable"
 
 # ================= APP =================
 app = FastAPI()
 
+
+@app.exception_handler(PyMongoError)
+async def pymongo_exception_handler(request, exc):
+    return JSONResponse(
+        status_code=500,
+        content={"detail": "Database connection error. Please ensure MongoDB is running."},
+    )
+
+
+@app.exception_handler(Exception)
+async def general_exception_handler(request, exc):
+    return JSONResponse(
+        status_code=500,
+        content={"detail": f"Internal Server Error: {str(exc)}"},
+    )
+
+app.mount(
+    "/uploads",
+    StaticFiles(directory="uploads"),
+    name="uploads"
+)
+
+origins = [
+    "http://localhost:5173",
+    "http://localhost:5174",
+    "http://localhost:5175",
+    "http://127.0.0.1:5173",
+    "http://127.0.0.1:5174",
+    "http://127.0.0.1:5175",
+]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=origins,
+    allow_origin_regex="https?://(localhost|127\\.0\\.0\\.1)(:\\d+)?",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 UPLOAD_DIR = "uploads"
-os.makedirs(UPLOAD_DIR, exist_ok=True)
+
+os.makedirs(
+    UPLOAD_DIR,
+    exist_ok=True
+)
 
 # ================= DATABASE =================
-Base.metadata.create_all(bind=engine)
-
 def get_db():
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
+    return db
 
-# ================= AI MEMORY =================
-embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
-def get_user_vector_db(user_id: int):
+# ================= EMBEDDINGS =================
+embeddings = HuggingFaceEmbeddings(
+    model_name="all-MiniLM-L6-v2"
+)
+
+def get_user_vector_db(user_id: str):
+
     return Chroma(
         persist_directory=f"chroma_db/user_{user_id}",
         embedding_function=embeddings
     )
 
-
-
 # ================= SCHEMAS =================
 class TextData(BaseModel):
     text: str
-    user_id: int
-
+    user_id: str
 
 class Question(BaseModel):
     question: str
-    user_id: int
-
+    user_id: str
+    filename: Optional[str] = None
 
 class SignupRequest(BaseModel):
     name: str
@@ -96,27 +159,77 @@ class LoginRequest(BaseModel):
 
 @app.post("/upload-text")
 def upload_text(data: TextData):
-    splitter = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=50)
+
+    if not data.text.strip():
+
+        raise HTTPException(
+            status_code=400,
+            detail="Text is empty"
+        )
+
+    splitter = RecursiveCharacterTextSplitter(
+        chunk_size=500,
+        chunk_overlap=50
+    )
+
     chunks = splitter.split_text(data.text)
+
+    if not chunks:
+
+        raise HTTPException(
+            status_code=400,
+            detail="No text chunks created"
+        )
+
     vector_db = get_user_vector_db(data.user_id)
-    vector_db.add_texts(chunks)
-    return {"message": "Stored successfully"}
+
+    vector_db.add_texts(
+        texts=chunks,
+        metadatas=[{"filename": "raw_text"} for _ in chunks]
+    )
+
+    return {
+        "message": "Stored successfully"
+    }
+
+# ================= ASK =================
 
 @app.post("/ask")
 def ask_question(data: Question):
+
     vector_db = get_user_vector_db(data.user_id)
-    docs = vector_db.similarity_search(data.question, k=3)
+
+    filter_dict = {}
+    if data.filename:
+        filter_dict["filename"] = data.filename
+
+    docs = vector_db.similarity_search(
+        data.question,
+        k=3,
+        filter=filter_dict if filter_dict else None
+    )
 
     if not docs:
-        return {"answer": "I don't know"}
 
-    context = "\n".join(doc.page_content for doc in docs)
+        return {
+            "answer": "No relevant document found",
+            "quote": ""
+        }
+
+    context = "\n".join(
+        doc.page_content for doc in docs
+    )
 
     prompt = f"""
 You are a legal AI assistant.
 
-Answer ONLY using the context below.
-If the answer is not in the context, say "I don't know".
+Based on the context below, answer the question and extract the exact short text snippet (1 to 5 words) from the context that directly represents the answer (e.g., the topic title, the specific date, or the name of a party) to highlight in the PDF.
+
+Respond in JSON format with these exact keys:
+{{
+  "answer": "your natural language answer here",
+  "quote": "the exact short text snippet from the context here"
+}}
 
 Context:
 {context}
@@ -125,121 +238,354 @@ Question:
 {data.question}
 """
 
-    answer = call_gemini(prompt)
-    return {"answer": answer}
+    answer_raw = call_groq(prompt, json_mode=True)
 
+    import json
+    try:
+        data_json = json.loads(answer_raw)
+        answer = data_json.get("answer", answer_raw)
+        quote = data_json.get("quote", "")
+    except Exception:
+        answer = answer_raw
+        quote = ""
 
+    # Increment QnA count for the document in MongoDB
+    if data.filename:
+        try:
+            db.documents.update_one(
+                {"user_id": data.user_id, "filename": data.filename},
+                {"$inc": {"qna_count": 1}}
+            )
+        except Exception as e:
+            print("Error incrementing qna_count:", e)
 
+    return {
+        "answer": answer,
+        "quote": quote,
+        "context": context
+    }
+
+# ================= AUTH =================
 
 @app.post("/signup")
-def signup(data: SignupRequest, db: Session = Depends(get_db)):
-    existing = db.query(User).filter(User.email == data.email).first()
+def signup(
+    data: SignupRequest,
+    db = Depends(get_db)
+):
+
+    existing = db.users.find_one({"email": data.email})
+
     if existing:
-        raise HTTPException(status_code=400, detail="Email already registered")
 
-    user = User(
-        name=data.name,
-        email=data.email,
-        password=hash_password(data.password)
-    )
+        raise HTTPException(
+            status_code=400,
+            detail="Email already exists"
+        )
 
-    db.add(user)
-    db.commit()
-    db.refresh(user)
+    user = {
+        "name": data.name,
+        "email": data.email,
+        "password": hash_password(data.password),
+        "created_at": datetime.now(timezone.utc)
+    }
 
-    return {"message": "Signup successful"}
+    db.users.insert_one(user)
+
+    return {
+        "message": "Signup successful"
+    }
 
 @app.post("/login")
-def login(data: LoginRequest, db: Session = Depends(get_db)):
-    # 1. Find user by email
-    user = db.query(User).filter(User.email == data.email).first()
+def login(
+    data: LoginRequest,
+    db = Depends(get_db)
+):
+
+    user = db.users.find_one({"email": data.email})
 
     if not user:
-        raise HTTPException(status_code=400, detail="Invalid email or password")
 
-    # 2. Verify password
-    if not verify_password(data.password, user.password):
-        raise HTTPException(status_code=400, detail="Invalid email or password")
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid credentials"
+        )
 
-    # 3. Success
+    if not verify_password(
+        data.password,
+        user["password"]
+    ):
+
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid credentials"
+        )
+
     return {
         "message": "Login successful",
         "user": {
-            "id": user.id,
-            "name": user.name,
-            "email": user.email
+            "id": str(user["_id"]),
+            "name": user["name"],
+            "email": user["email"]
         }
     }
 
+# ================= FILE UPLOAD =================
 
 @app.post("/upload")
-async def upload_file(file: UploadFile = File(...)):
-    file_path = os.path.join(UPLOAD_DIR, file.filename)
+async def upload_file(
+    file: UploadFile = File(...)
+):
+
+    file_path = os.path.join(
+        UPLOAD_DIR,
+        file.filename
+    )
 
     with open(file_path, "wb") as buffer:
-        shutil.copyfileobj(file.file, buffer)
+
+        shutil.copyfileobj(
+            file.file,
+            buffer
+        )
 
     return {
-        "message": "File uploaded successfully",
+        "message": "File uploaded",
         "filename": file.filename
     }
 
+# ================= INDEX DOCUMENT =================
 
 @app.post("/upload-and-index")
-async def upload_and_index(filename: str = Body(...), user_id: int = Body(...)):
+async def upload_and_index(
+    filename: str = Body(...),
+    user_id: str = Body(...)
+):
+
     file_path = f"uploads/{filename}"
 
     if not os.path.exists(file_path):
-        raise HTTPException(status_code=404, detail="File not found")
 
-    # Extract text
+        raise HTTPException(
+            status_code=404,
+            detail="File not found"
+        )
+
+    # ===== EXTRACT TEXT =====
+
     if filename.lower().endswith(".pdf"):
+
         text = extract_text_from_pdf(file_path)
 
-    elif filename.lower().endswith((".png", ".jpg", ".jpeg")):
+    elif filename.lower().endswith(
+        (".png", ".jpg", ".jpeg")
+    ):
+
         text = extract_text_from_image(file_path)
 
     else:
-        with open(file_path, "r", encoding="utf-8") as f:
+
+        with open(
+            file_path,
+            "r",
+            encoding="utf-8"
+        ) as f:
+
             text = f.read()
 
-    # Split + store in vector DB
+    # ===== EMPTY TEXT CHECK =====
+
+    if not text or not text.strip():
+
+        raise HTTPException(
+            status_code=400,
+            detail="Could not extract text from document"
+        )
+
+    # ===== CLEAR PREVIOUS USER VECTOR INDEX =====
+    db_path = f"chroma_db/user_{user_id}"
+    if os.path.exists(db_path):
+        try:
+            shutil.rmtree(db_path, ignore_errors=True)
+        except Exception as e:
+            print("Failed to delete chroma_db directory:", e)
+
+    # ===== SPLIT =====
+
     splitter = RecursiveCharacterTextSplitter(
         chunk_size=500,
         chunk_overlap=50
     )
+
     chunks = splitter.split_text(text)
+
+    if not chunks:
+
+        raise HTTPException(
+            status_code=400,
+            detail="No chunks generated"
+        )
+
+    # ===== STORE =====
+
     vector_db = get_user_vector_db(user_id)
-    vector_db.add_texts(chunks)
 
-    return {"message": "Document indexed successfully"}
+    vector_db.add_texts(
+        texts=chunks,
+        metadatas=[{"filename": filename} for _ in chunks]
+    )
 
+    # ===== DOCUMENT CLASSIFICATION AND SAFETY RULES =====
+    text_snippet = text[:4000]
+    classify_prompt = f"""
+Analyze the following document content and classify its type (e.g., Aadhaar Card, PAN Card, Rent Agreement, Non-Disclosure Agreement (NDA), Employment Contract, Invoice, Generic Document, etc.).
+Based on the document type, generate rules, regulations, precautions, and a list of "Dos and Don'ts" that the user should be aware of regarding this document (such as data privacy guidelines, legal validity, typical traps, and precautions to take).
+
+Respond STRICTLY in JSON format with these exact keys:
+{{
+  "document_type": "The classified document type (e.g., Aadhaar Card)",
+  "precautions": ["precaution 1", "precaution 2", ...],
+  "dos": ["do 1", "do 2", ...],
+  "donts": ["dont 1", "dont 2", ...]
+}}
+
+Document Text Snippet:
+{text_snippet}
+"""
+    analysis_raw = call_groq(classify_prompt, json_mode=True)
+    
+    import json
+    try:
+        analysis = json.loads(analysis_raw)
+    except Exception as e:
+        print("Failed to parse classification JSON, using fallback:", e)
+        analysis = {
+            "document_type": "Generic Document",
+            "precautions": ["Ensure the source of the document is verified.", "Store the document securely to protect sensitive data."],
+            "dos": ["Read all terms carefully before signing or submitting.", "Verify signatures, dates, and names."],
+            "donts": ["Do not share with unauthorized individuals.", "Do not ignore hidden clauses or fees."]
+        }
+
+    # ===== SAVE METADATA TO MONGODB =====
+    try:
+        doc_metadata = {
+            "user_id": user_id,
+            "filename": filename,
+            "uploaded_at": datetime.now(timezone.utc),
+            "document_type": analysis.get("document_type", "Generic Document"),
+            "analysis": analysis,
+            "qna_count": 0
+        }
+        db.documents.update_one(
+            {"user_id": user_id, "filename": filename},
+            {"$set": doc_metadata},
+            upsert=True
+        )
+    except Exception as e:
+        print("Failed to save document metadata in MongoDB:", e)
+
+    return {
+        "message": "Document indexed successfully",
+        "chunks": len(chunks),
+        "analysis": analysis
+    }
+
+# ================= HISTORY ENDPOINT =================
+
+@app.get("/history")
+def get_history(user_id: str):
+    try:
+        docs = list(db.documents.find({"user_id": user_id}).sort("uploaded_at", -1))
+        serialized_docs = []
+        for doc in docs:
+            serialized_docs.append({
+                "id": str(doc["_id"]),
+                "filename": doc["filename"],
+                "uploaded_at": doc["uploaded_at"].isoformat() if isinstance(doc["uploaded_at"], datetime) else doc["uploaded_at"],
+                "document_type": doc.get("document_type", "Generic Document"),
+                "analysis": doc.get("analysis", {}),
+                "qna_count": doc.get("qna_count", 0)
+            })
+        return serialized_docs
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+# ================= ANALYTICS ENDPOINT =================
+
+@app.get("/analytics")
+def get_analytics(user_id: str):
+    try:
+        docs = list(db.documents.find({"user_id": user_id}))
+        
+        total_docs = len(docs)
+        total_questions = sum(doc.get("qna_count", 0) for doc in docs)
+        
+        # Calculate document type distribution
+        type_distribution = {}
+        for doc in docs:
+            doc_type = doc.get("document_type", "Generic Document")
+            type_distribution[doc_type] = type_distribution.get(doc_type, 0) + 1
+            
+        # Compile recent activity (last 5 uploads)
+        sorted_docs = sorted(docs, key=lambda x: x.get("uploaded_at", datetime.min), reverse=True)
+        recent_activity = []
+        for doc in sorted_docs[:5]:
+            recent_activity.append({
+                "filename": doc["filename"],
+                "uploaded_at": doc["uploaded_at"].isoformat() if isinstance(doc["uploaded_at"], datetime) else doc["uploaded_at"],
+                "document_type": doc.get("document_type", "Generic Document"),
+                "qna_count": doc.get("qna_count", 0)
+            })
+            
+        return {
+            "total_documents": total_docs,
+            "total_questions": total_questions,
+            "type_distribution": type_distribution,
+            "recent_activity": recent_activity
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+# ================= TEST =================
 
 @app.get("/")
 def home():
-    return {"msg": "LexAI backend running"}
 
-   
+    return {
+        "msg": "LexAI backend running"
+    }
 
 @app.get("/db-test")
 def db_test():
+
     try:
-        with engine.connect() as conn:
-            conn.execute(text("SELECT 1"))
-        return {"message": "Database connected"}
+
+        db.command("ping")
+
+        return {
+            "message": "Database connected"
+        }
+
     except Exception as e:
-        return {"error": str(e)}
-    
-@app.get("/test-gemini")
-def test_gemini():
+
+        return {
+            "error": str(e)
+        }
+
+@app.get("/test-groq")
+def test_groq():
+
     try:
-        reply = call_gemini("Say hello in one sentence")
-        return {"reply": reply}
+
+        reply = call_groq(
+            "Say hello"
+        )
+
+        return {
+            "reply": reply
+        }
+
     except Exception as e:
-        return {"error": str(e)}
 
-
-
-
-
-
+        return {
+            "error": str(e)
+        }
