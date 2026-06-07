@@ -29,13 +29,30 @@ export default function PDFViewer({ pdfUrl, searchText }) {
 
   useEffect(() => {
     if (isDocumentLoaded && searchText && searchText.trim()) {
-      const searchTerms = searchText
+      const searchTerms = [];
+      const rawParts = searchText
         .split(",")
         .map((term) => term.trim())
         .filter((term) => term.length > 0);
       
-      if (searchTerms.length > 0) {
-        highlight(searchTerms);
+      for (const part of rawParts) {
+        searchTerms.push(part);
+        
+        // Split long terms into 2-word fallback chunks to handle spacing/kerning mismatches
+        const words = part.split(/\s+/).filter((w) => w.length > 0);
+        if (words.length > 3) {
+          for (let i = 0; i < words.length - 1; i++) {
+            // Keep 2-word chunks where at least one word has a meaningful length (>= 4)
+            if (words[i].length >= 4 || words[i+1].length >= 4) {
+              searchTerms.push(`${words[i]} ${words[i+1]}`);
+            }
+          }
+        }
+      }
+      
+      const uniqueTerms = Array.from(new Set(searchTerms));
+      if (uniqueTerms.length > 0) {
+        highlight(uniqueTerms);
       }
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
